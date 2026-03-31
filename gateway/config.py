@@ -62,6 +62,7 @@ class Platform(Enum):
     EMAIL = "email"
     SMS = "sms"
     DINGTALK = "dingtalk"
+    WEIXIN = "weixin"
     API_SERVER = "api_server"
     WEBHOOK = "webhook"
     FEISHU = "feishu"
@@ -261,6 +262,11 @@ class GatewayConfig:
         connected = []
         for platform, config in self.platforms.items():
             if not config.enabled:
+                continue
+            # Weixin needs both token and account_id from QR login.
+            if platform == Platform.WEIXIN:
+                if config.token and config.extra.get("account_id"):
+                    connected.append(platform)
                 continue
             # Platforms that use token/api_key auth
             if config.token or config.api_key:
@@ -872,6 +878,27 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
                 name=os.getenv("FEISHU_HOME_CHANNEL_NAME", "Home"),
             )
 
+    # WeChat (Weixin)
+    weixin_token = os.getenv("WEIXIN_TOKEN")
+    if weixin_token:
+        if Platform.WEIXIN not in config.platforms:
+            config.platforms[Platform.WEIXIN] = PlatformConfig()
+        config.platforms[Platform.WEIXIN].enabled = True
+        config.platforms[Platform.WEIXIN].token = weixin_token
+        extra = config.platforms[Platform.WEIXIN].extra
+        extra["base_url"] = os.getenv("WEIXIN_BASE_URL", "https://ilinkai.weixin.qq.com")
+        extra["cdn_base_url"] = os.getenv("WEIXIN_CDN_BASE_URL", "https://novac2c.cdn.weixin.qq.com/c2c")
+        weixin_account_id = os.getenv("WEIXIN_ACCOUNT_ID", "")
+        if weixin_account_id:
+            extra["account_id"] = weixin_account_id
+        weixin_home = os.getenv("WEIXIN_HOME_CHANNEL")
+        if weixin_home:
+            config.platforms[Platform.WEIXIN].home_channel = HomeChannel(
+                platform=Platform.WEIXIN,
+                chat_id=weixin_home,
+                name=os.getenv("WEIXIN_HOME_CHANNEL_NAME", "Home"),
+            )
+
     # WeCom (Enterprise WeChat)
     wecom_bot_id = os.getenv("WECOM_BOT_ID")
     wecom_secret = os.getenv("WECOM_SECRET")
@@ -908,5 +935,3 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
             config.default_reset_policy.at_hour = int(reset_hour)
         except ValueError:
             pass
-
-
