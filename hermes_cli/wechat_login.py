@@ -91,9 +91,12 @@ def _print_qr(qrcode_url: str) -> None:
         qr.add_data(qrcode_url)
         qr.make()
         qr.print_ascii(invert=True)
+        print("\nScan this QR code with WeChat to connect.\n")
+        return
 
+    print("\nTerminal QR rendering is unavailable because the `qrcode` package is not installed.")
     print(f"\nQR Code URL: {qrcode_url}")
-    print("\nScan this QR code with WeChat to connect.\n")
+    print("\nOpen the link above to load the QR code in a browser, then scan it with WeChat.\n")
 
 
 async def run_wechat_login(base_url: str | None = None, max_attempts: int = 60) -> dict[str, str]:
@@ -161,4 +164,3 @@ async def run_wechat_login(base_url: str | None = None, max_attempts: int = 60) 
                 }
 
         raise RuntimeError("Login timed out. Please try again.")
-
