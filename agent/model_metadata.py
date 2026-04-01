@@ -386,11 +386,15 @@ def fetch_model_metadata(force_refresh: bool = False) -> Dict[str, Dict[str, Any
         cache = {}
         for model in data.get("data", []):
             model_id = model.get("id", "")
+            arch = model.get("architecture", {})
+            input_mods = arch.get("input_modalities", []) if isinstance(arch, dict) else []
             entry = {
                 "context_length": model.get("context_length", 128000),
                 "max_completion_tokens": model.get("top_provider", {}).get("max_completion_tokens", 4096),
                 "name": model.get("name", model_id),
                 "pricing": model.get("pricing", {}),
+                "supports_vision": "image" in input_mods,
+                "supports_audio": "audio" in input_mods,
             }
             _add_model_aliases(cache, model_id, entry)
             canonical = model.get("canonical_slug", "")
@@ -929,3 +933,17 @@ def estimate_request_tokens_rough(
     if tools:
         total_chars += len(str(tools))
     return total_chars // 4
+
+
+def get_model_capabilities(model: str, provider: Optional[str] = None) -> Dict[str, bool]:
+    """Get multimodal capabilities for a model.
+    
+    Returns dict with keys: supports_vision, supports_audio
+    Checks OpenRouter cache first, falls back to False if not found.
+    """
+    metadata = fetch_model_metadata()
+    entry = metadata.get(model.lower(), {})
+    return {
+        "supports_vision": entry.get("supports_vision", False),
+        "supports_audio": entry.get("supports_audio", False),
+    }

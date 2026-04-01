@@ -633,3 +633,75 @@ class TestContextLengthCache:
         with patch("agent.model_metadata._get_context_cache_path", return_value=cache_file):
             save_context_length(model, url, 200000)
             assert get_cached_context_length(model, url) == 200000
+
+
+# =========================================================================
+# Model capabilities
+# =========================================================================
+
+class TestModelCapabilities:
+    def test_extract_vision_capability(self):
+        """Test that vision capability is extracted from OpenRouter data."""
+        from agent.model_metadata import get_model_capabilities
+        
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "data": [
+                {
+                    "id": "test/vision-model",
+                    "context_length": 128000,
+                    "architecture": {
+                        "input_modalities": ["text", "image"]
+                    }
+                }
+            ]
+        }
+        
+        with patch("agent.model_metadata.requests.get", return_value=mock_response):
+            caps = get_model_capabilities("test/vision-model")
+            assert caps["supports_vision"] is True
+            assert caps["supports_audio"] is False
+    
+    def test_extract_audio_capability(self):
+        """Test that audio capability is extracted from OpenRouter data."""
+        from agent.model_metadata import get_model_capabilities
+        
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "data": [
+                {
+                    "id": "test/audio-model",
+                    "context_length": 128000,
+                    "architecture": {
+                        "input_modalities": ["text", "audio"]
+                    }
+                }
+            ]
+        }
+        
+        with patch("agent.model_metadata.requests.get", return_value=mock_response):
+            caps = get_model_capabilities("test/audio-model")
+            assert caps["supports_vision"] is False
+            assert caps["supports_audio"] is True
+    
+    def test_no_capabilities(self):
+        """Test model with no multimodal capabilities."""
+        from agent.model_metadata import get_model_capabilities
+        
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "data": [
+                {
+                    "id": "test/text-only",
+                    "context_length": 128000,
+                    "architecture": {
+                        "input_modalities": ["text"]
+                    }
+                }
+            ]
+        }
+        
+        with patch("agent.model_metadata.requests.get", return_value=mock_response):
+            caps = get_model_capabilities("test/text-only")
+            assert caps["supports_vision"] is False
+            assert caps["supports_audio"] is False
