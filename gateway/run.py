@@ -14,8 +14,10 @@ Usage:
 """
 
 import asyncio
+import base64
 import json
 import logging
+import mimetypes
 import os
 import re
 import shlex
@@ -29,6 +31,8 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, Optional, Any, List
+
+from agent.message_content import content_to_text
 
 # ---------------------------------------------------------------------------
 # SSL certificate auto-detection for NixOS and other non-standard systems.
@@ -270,6 +274,18 @@ def _expand_whatsapp_auth_aliases(identifier: str) -> set:
     return resolved
 
 logger = logging.getLogger(__name__)
+
+
+def _image_path_to_data_url(path: str, media_type: str = "") -> Optional[str]:
+    try:
+        raw = Path(path).read_bytes()
+    except OSError:
+        return None
+    mime = media_type if isinstance(media_type, str) and media_type.startswith("image/") else ""
+    if not mime:
+        mime = mimetypes.guess_type(path)[0] or "image/jpeg"
+    encoded = base64.b64encode(raw).decode("ascii")
+    return f"data:{mime};base64,{encoded}"
 
 # Sentinel placed into _running_agents immediately when a session starts
 # processing, *before* any await.  Prevents a second message for the same
@@ -673,7 +689,7 @@ class GatewayRunner:
             msgs = [
                 {"role": m.get("role"), "content": m.get("content")}
                 for m in history
-                if m.get("role") in ("user", "assistant") and m.get("content")
+                if m.get("role") in ("user", "assistant") and content_to_text(m.get("content"))
             ]
 
             # Read live memory state from disk so the flush agent can see
@@ -2478,20 +2494,20 @@ class GatewayRunner:
                     context_prompt += f"\n\n{vc_context}"
 
         # -----------------------------------------------------------------
-        # Auto-analyze images sent by the user
+        # Image input handling
         #
-        # If the user attached image(s), we run the vision tool eagerly so
-        # the conversation model always receives a text description.  The
-        # local file path is also included so the model can re-examine the
-        # image later with a more targeted question via vision_analyze.
+        # If the resolved turn model supports vision, preserve the user's
+        # message as native multimodal content. Otherwise fall back to eager
+        # vision analysis so non-vision models still receive a text summary.
         #
         # We filter to image paths only (by media_type) so that non-image
         # attachments (documents, audio, etc.) are not sent to the vision
-        # tool even when they appear in the same message.
+        # path even when they appear in the same message.
         # -----------------------------------------------------------------
-        message_text = event.text or ""
+        message_text: Any = event.text or ""
         if event.media_urls:
             image_paths = []
+            image_payloads = []
             for i, path in enumerate(event.media_urls):
                 # Check media_types if available; otherwise infer from message type
                 mtype = event.media_types[i] if i < len(event.media_types) else ""
@@ -2501,10 +2517,79 @@ class GatewayRunner:
                 )
                 if is_image:
                     image_paths.append(path)
+                    image_payloads.append((path, mtype))
             if image_paths:
-                message_text = await self._enrich_message_with_vision(
-                    message_text, image_paths
-                )
+                resolved_turn_model = None
+                try:
+                    user_config = _load_gateway_config()
+                    model = _resolve_gateway_model(user_config)
+                    runtime_kwargs = _resolve_runtime_agent_kwargs()
+                    route_probe_parts: List[Dict[str, Any]] = []
+                    if event.text:
+                        route_probe_parts.append({"type": "text", "text": event.text})
+                    route_probe_parts.extend(
+                        {"type": "image_url", "image_url": {"url": path}}
+                        for path in image_paths
+                    )
+                    route_probe_message = (
+                        route_probe_parts if route_probe_parts else (event.text or "")
+                    )
+                    resolved_turn_model = (
+                        self._resolve_turn_agent_config(
+                            content_to_text(
+                                route_probe_message,
+                                image_placeholder="[image]",
+                                fallback_json=True,
+                            ),
+                            model,
+                            runtime_kwargs,
+                        ).get("model")
+                        or model
+                    )
+
+                    from agent.model_metadata import get_model_capabilities
+
+                    supports_vision = bool(
+                        get_model_capabilities(resolved_turn_model).get("supports_vision")
+                    )
+                except Exception:
+                    supports_vision = False
+                    try:
+                        resolved_turn_model = _resolve_gateway_model(_load_gateway_config())
+                    except Exception:
+                        resolved_turn_model = None
+
+                if os.getenv("HERMES_PRINT_API_REQUEST_BODY"):
+                    try:
+                        print(
+                            f"\n[Gateway image routing] resolved_model={resolved_turn_model} "
+                            f"supports_vision={supports_vision} image_count={len(image_paths)}",
+                            flush=True,
+                        )
+                    except Exception:
+                        pass
+
+                if supports_vision:
+                    multimodal_parts: List[Dict[str, Any]] = []
+                    if event.text:
+                        multimodal_parts.append({"type": "text", "text": event.text})
+                    for path, mtype in image_payloads:
+                        data_url = _image_path_to_data_url(path, mtype)
+                        if not data_url:
+                            continue
+                        multimodal_parts.append(
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": data_url, "detail": "auto"},
+                            }
+                        )
+                    if multimodal_parts:
+                        message_text = multimodal_parts
+                else:
+                    message_text = await self._enrich_message_with_vision(
+                        content_to_text(message_text),
+                        image_paths,
+                    )
         
         # -----------------------------------------------------------------
         # Auto-transcribe voice/audio messages sent by the user
@@ -2532,7 +2617,8 @@ class GatewayRunner:
                     "can't listen",
                     "VOICE_TOOLS_OPENAI_KEY",
                 )
-                if any(m in message_text for m in _stt_fail_markers):
+                _message_text_plain = content_to_text(message_text, fallback_json=True)
+                if any(m in _message_text_plain for m in _stt_fail_markers):
                     _stt_adapter = self.adapters.get(source.platform)
                     _stt_meta = {"thread_id": source.thread_id} if source.thread_id else None
                     if _stt_adapter:
@@ -2585,7 +2671,10 @@ class GatewayRunner:
                         f"The file is saved at: {path}. "
                         f"Ask the user what they'd like you to do with it.]"
                     )
-                message_text = f"{context_note}\n\n{message_text}"
+                if isinstance(message_text, list):
+                    message_text = [{"type": "text", "text": context_note}] + message_text
+                else:
+                    message_text = f"{context_note}\n\n{message_text}"
 
         # -----------------------------------------------------------------
         # Inject reply context when user replies to a message not in history.
@@ -2597,12 +2686,16 @@ class GatewayRunner:
         if getattr(event, 'reply_to_text', None) and event.reply_to_message_id:
             reply_snippet = event.reply_to_text[:500]
             found_in_history = any(
-                reply_snippet[:200] in (msg.get("content") or "")
+                reply_snippet[:200] in content_to_text(msg.get("content"))
                 for msg in history
                 if msg.get("role") in ("assistant", "user", "tool")
             )
             if not found_in_history:
-                message_text = f'[Replying to: "{reply_snippet}"]\n\n{message_text}'
+                reply_note = f'[Replying to: "{reply_snippet}"]'
+                if isinstance(message_text, list):
+                    message_text = [{"type": "text", "text": reply_note}] + message_text
+                else:
+                    message_text = f"{reply_note}\n\n{message_text}"
 
         try:
             # Emit agent:start hook
@@ -2610,18 +2703,27 @@ class GatewayRunner:
                 "platform": source.platform.value if source.platform else "",
                 "user_id": source.user_id,
                 "session_id": session_entry.session_id,
-                "message": message_text[:500],
+                    "message": content_to_text(message_text, fallback_json=True)[:500],
             }
             await self.hooks.emit("agent:start", hook_ctx)
 
             # Expand @ context references (@file:, @folder:, @diff, etc.)
-            if "@" in message_text:
+            if isinstance(message_text, str) and "@" in message_text:
                 try:
                     from agent.context_references import preprocess_context_references_async
                     from agent.model_metadata import get_model_context_length
                     _msg_cwd = os.environ.get("MESSAGING_CWD", os.path.expanduser("~"))
+                    _msg_model = _resolve_gateway_model(_load_gateway_config())
+                    _msg_base_url = ""
+                    try:
+                        _msg_runtime = _resolve_runtime_agent_kwargs()
+                        _msg_base_url = _msg_runtime.get("base_url") or ""
+                    except Exception:
+                        pass
                     _msg_ctx_len = get_model_context_length(
-                        self._model, base_url=self._base_url or "")
+                        _msg_model,
+                        base_url=_msg_base_url,
+                    )
                     _ctx_result = await preprocess_context_references_async(
                         message_text, cwd=_msg_cwd,
                         context_length=_msg_ctx_len, allowed_root=_msg_cwd)
@@ -4396,7 +4498,7 @@ class GatewayRunner:
             msgs = [
                 {"role": m.get("role"), "content": m.get("content")}
                 for m in history
-                if m.get("role") in ("user", "assistant") and m.get("content")
+                if m.get("role") in ("user", "assistant") and content_to_text(m.get("content"))
             ]
             original_count = len(msgs)
             approx_tokens = estimate_messages_tokens_rough(msgs)
@@ -4596,7 +4698,7 @@ class GatewayRunner:
         history = self.session_store.load_transcript(session_entry.session_id)
         if history:
             from agent.model_metadata import estimate_messages_tokens_rough
-            msgs = [m for m in history if m.get("role") in ("user", "assistant") and m.get("content")]
+            msgs = [m for m in history if m.get("role") in ("user", "assistant") and content_to_text(m.get("content"))]
             approx = estimate_messages_tokens_rough(msgs)
             return (
                 f"📊 **Session Info**\n"
@@ -5359,7 +5461,7 @@ class GatewayRunner:
 
     async def _run_agent(
         self,
-        message: str,
+        message: Any,
         context_prompt: str,
         history: List[Dict[str, Any]],
         source: SessionSource,
@@ -5680,7 +5782,11 @@ class GatewayRunner:
                 except Exception as _sc_err:
                     logger.debug("Could not set up stream consumer: %s", _sc_err)
 
-            turn_route = self._resolve_turn_agent_config(message, model, runtime_kwargs)
+            turn_route = self._resolve_turn_agent_config(
+                content_to_text(message, image_placeholder="[image]", fallback_json=True),
+                model,
+                runtime_kwargs,
+            )
 
             # Check agent cache — reuse the AIAgent from the previous message
             # in this session to preserve the frozen system prompt and tool
@@ -5798,11 +5904,17 @@ class GatewayRunner:
                 else:
                     # Simple text message - just need role and content
                     content = msg.get("content")
-                    if content:
+                    if content_to_text(content):
                         # Tag cross-platform mirror messages so the agent knows their origin
                         if msg.get("mirror"):
                             mirror_src = msg.get("mirror_source", "another session")
-                            content = f"[Delivered from {mirror_src}] {content}"
+                            if isinstance(content, list):
+                                content = [
+                                    {"type": "text", "text": f"[Delivered from {mirror_src}]"},
+                                    *content,
+                                ]
+                            else:
+                                content = f"[Delivered from {mirror_src}] {content}"
                         entry = {"role": role, "content": content}
                         # Preserve reasoning fields on assistant messages so
                         # multi-turn reasoning context survives session reload.
@@ -5822,7 +5934,7 @@ class GatewayRunner:
             _history_media_paths: set = set()
             for _hm in agent_history:
                 if _hm.get("role") in ("tool", "function"):
-                    _hc = _hm.get("content", "")
+                    _hc = content_to_text(_hm.get("content"), fallback_json=True)
                     if "MEDIA:" in _hc:
                         for _match in re.finditer(r'MEDIA:(\S+)', _hc):
                             _p = _match.group(1).strip().rstrip('",}')
@@ -5879,7 +5991,7 @@ class GatewayRunner:
                 has_voice_directive = False
                 for msg in result.get("messages", []):
                     if msg.get("role") in ("tool", "function"):
-                        content = msg.get("content", "")
+                        content = content_to_text(msg.get("content"), fallback_json=True)
                         if "MEDIA:" in content:
                             for match in re.finditer(r'MEDIA:(\S+)', content):
                                 path = match.group(1).strip().rstrip('",}')
