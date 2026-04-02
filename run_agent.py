@@ -2168,32 +2168,11 @@ class AIAgent:
 
             self._vprint(f"{self.log_prefix}🧾 Request debug dump written to: {dump_file}")
 
-            if os.getenv("HERMES_DUMP_REQUEST_STDOUT", "").strip().lower() in {"1", "true", "yes", "on"}:
-                print(json.dumps(dump_payload, ensure_ascii=False, indent=2, default=str))
-
             return dump_file
         except Exception as dump_error:
             if self.verbose_logging:
                 logging.warning(f"Failed to dump API request debug payload: {dump_error}")
             return None
-
-    def _maybe_print_api_request_body(self, api_kwargs: Dict[str, Any], *, streaming: bool = False) -> None:
-        """Print the outbound provider request body when explicitly enabled.
-
-        Intended for real-world debugging from the CLI/gateway terminal without
-        forcing an error-path request dump.
-        """
-        if os.getenv("HERMES_PRINT_API_REQUEST_BODY", "").strip().lower() not in {"1", "true", "yes", "on"}:
-            return
-        try:
-            body = copy.deepcopy(api_kwargs)
-            body.pop("timeout", None)
-            body = {k: v for k, v in body.items() if v is not None}
-            label = "stream" if streaming else "request"
-            self._safe_print(f"\n{self.log_prefix}🧾 Outbound API {label} body:")
-            self._safe_print(json.dumps(body, ensure_ascii=False, indent=2, default=str))
-        except Exception as exc:
-            logger.debug("Failed to print outbound API request body: %s", exc)
 
     @staticmethod
     def _clean_session_content(content: Any) -> Any:
@@ -4119,7 +4098,6 @@ class AIAgent:
         """
         result = {"response": None, "error": None}
         request_client_holder = {"client": None}
-        self._maybe_print_api_request_body(api_kwargs, streaming=False)
 
         def _call():
             try:
@@ -4251,7 +4229,6 @@ class AIAgent:
 
         result = {"response": None, "error": None}
         request_client_holder = {"client": None}
-        self._maybe_print_api_request_body(api_kwargs, streaming=True)
         first_delta_fired = {"done": False}
         deltas_were_sent = {"yes": False}  # Track if any deltas were fired (for fallback)
         # Wall-clock timestamp of the last real streaming chunk.  The outer
@@ -7027,9 +7004,6 @@ class AIAgent:
                     api_kwargs = self._build_api_kwargs(api_messages)
                     if self.api_mode == "codex_responses":
                         api_kwargs = self._preflight_codex_api_kwargs(api_kwargs, allow_stream=False)
-
-                    if os.getenv("HERMES_DUMP_REQUESTS", "").strip().lower() in {"1", "true", "yes", "on"}:
-                        self._dump_api_request_debug(api_kwargs, reason="preflight")
 
                     # Always prefer the streaming path — even without stream
                     # consumers.  Streaming gives us fine-grained health
