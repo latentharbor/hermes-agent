@@ -2711,6 +2711,63 @@ class TestAnthropicImageFallback:
         assert mock_vision.await_count == 1
 
 
+class TestNativeMultimodalRouting:
+    def test_native_vision_models_hide_auxiliary_vision_tool(self):
+        with (
+            patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("run_agent.OpenAI"),
+            patch(
+                "run_agent.get_tool_definitions",
+                side_effect=lambda **kwargs: _make_tool_defs(
+                    "web_search",
+                    *(["vision_analyze"] if not kwargs.get("omit_vision_analyze") else []),
+                ),
+            ) as mock_get_tools,
+            patch(
+                "agent.model_metadata.get_model_capabilities",
+                return_value={"supports_vision": True, "supports_audio": False},
+            ),
+        ):
+            agent = AIAgent(
+                model="gpt-5.4",
+                api_key="test-key-1234567890",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+            )
+
+        assert "vision_analyze" not in agent.valid_tool_names
+        assert mock_get_tools.call_args.kwargs["omit_vision_analyze"] is True
+
+    def test_chat_completions_build_api_kwargs_preserves_multimodal_content(self, agent):
+        agent.api_mode = "chat_completions"
+        api_messages = [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Describe this image"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA", "detail": "auto"}},
+            ],
+        }]
+
+        kwargs = agent._build_api_kwargs(api_messages)
+        assert kwargs["messages"][0]["content"][0]["type"] == "text"
+        assert kwargs["messages"][0]["content"][1]["type"] == "image_url"
+
+    def test_responses_build_api_kwargs_preserves_multimodal_content(self, agent):
+        agent.api_mode = "codex_responses"
+        api_messages = [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Describe this image"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA", "detail": "auto"}},
+            ],
+        }]
+
+        kwargs = agent._build_api_kwargs(api_messages)
+        assert kwargs["input"][0]["content"][0]["type"] == "input_text"
+        assert kwargs["input"][0]["content"][1]["type"] == "input_image"
+
+
 class TestFallbackAnthropicProvider:
     """Bug fix: _try_activate_fallback had no case for anthropic provider."""
 
