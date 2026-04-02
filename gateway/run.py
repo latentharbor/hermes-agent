@@ -2545,16 +2545,6 @@ class GatewayRunner:
                     except Exception:
                         resolved_turn_model = None
 
-                if os.getenv("HERMES_PRINT_API_REQUEST_BODY"):
-                    try:
-                        print(
-                            f"\n[Gateway image routing] resolved_model={resolved_turn_model} "
-                            f"supports_vision={supports_vision} image_count={len(image_paths)}",
-                            flush=True,
-                        )
-                    except Exception:
-                        pass
-
                 if supports_vision:
                     multimodal_parts: List[Dict[str, Any]] = []
                     if event.text:
