@@ -14,10 +14,8 @@ Usage:
 """
 
 import asyncio
-import base64
 import json
 import logging
-import mimetypes
 import os
 import re
 import shlex
@@ -32,7 +30,7 @@ from pathlib import Path
 from datetime import datetime
 from typing import Dict, Optional, Any, List
 
-from agent.message_content import content_to_text
+from agent.message_content import content_to_text, image_path_to_data_url
 
 # ---------------------------------------------------------------------------
 # SSL certificate auto-detection for NixOS and other non-standard systems.
@@ -274,18 +272,6 @@ def _expand_whatsapp_auth_aliases(identifier: str) -> set:
     return resolved
 
 logger = logging.getLogger(__name__)
-
-
-def _image_path_to_data_url(path: str, media_type: str = "") -> Optional[str]:
-    try:
-        raw = Path(path).read_bytes()
-    except OSError:
-        return None
-    mime = media_type if isinstance(media_type, str) and media_type.startswith("image/") else ""
-    if not mime:
-        mime = mimetypes.guess_type(path)[0] or "image/jpeg"
-    encoded = base64.b64encode(raw).decode("ascii")
-    return f"data:{mime};base64,{encoded}"
 
 # Sentinel placed into _running_agents immediately when a session starts
 # processing, *before* any await.  Prevents a second message for the same
@@ -2585,7 +2571,7 @@ class GatewayRunner:
                     if event.text:
                         multimodal_parts.append({"type": "text", "text": event.text})
                     for path, mtype in image_payloads:
-                        data_url = _image_path_to_data_url(path, mtype)
+                        data_url = image_path_to_data_url(path, mtype)
                         if not data_url:
                             continue
                         multimodal_parts.append(
@@ -5184,10 +5170,10 @@ class GatewayRunner:
         Auto-analyze user-attached images with the vision tool and prepend
         the descriptions to the message text.
 
-        Each image is analyzed with a general-purpose prompt.  The resulting
-        description *and* the local cache path are injected so the model can:
+        Each image is analyzed with a general-purpose prompt. The resulting
+        description and local cache path are injected so non-vision models can:
           1. Immediately understand what the user sent (no extra tool call).
-          2. Re-examine the image with vision_analyze if it needs more detail.
+          2. Re-open the original image with read_file if they need the file again.
 
         Args:
             user_text:   The user's original caption / message text.
@@ -5218,21 +5204,21 @@ class GatewayRunner:
                     description = result.get("analysis", "")
                     enriched_parts.append(
                         f"[The user sent an image~ Here's what I can see:\n{description}]\n"
-                        f"[If you need a closer look, use vision_analyze with "
-                        f"image_url: {path} ~]"
+                        f"[If you need the original file again, use read_file with "
+                        f"path: {path} ~]"
                     )
                 else:
                     enriched_parts.append(
                         "[The user sent an image but I couldn't quite see it "
                         "this time (>_<) You can try looking at it yourself "
-                        f"with vision_analyze using image_url: {path}]"
+                        f"with read_file using path: {path}]"
                     )
             except Exception as e:
                 logger.error("Vision auto-analysis error: %s", e)
                 enriched_parts.append(
                     f"[The user sent an image but something went wrong when I "
                     f"tried to look at it~ You can try examining it yourself "
-                    f"with vision_analyze using image_url: {path}]"
+                    f"with read_file using path: {path}]"
                 )
 
         # Combine: vision descriptions first, then the user's original text

@@ -10,10 +10,26 @@ and rough token estimation.
 from __future__ import annotations
 
 import json
+import base64
+import mimetypes
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 _TEXT_PART_TYPES = frozenset({"text", "input_text", "output_text"})
 _IMAGE_PART_TYPES = frozenset({"image_url", "input_image", "image"})
+
+
+def image_path_to_data_url(path: str, media_type: str = "") -> Optional[str]:
+    """Read a local image file and return a data URL."""
+    try:
+        raw = Path(path).read_bytes()
+    except OSError:
+        return None
+    mime = media_type if isinstance(media_type, str) and media_type.startswith("image/") else ""
+    if not mime:
+        mime = mimetypes.guess_type(path)[0] or "image/jpeg"
+    encoded = base64.b64encode(raw).decode("ascii")
+    return f"data:{mime};base64,{encoded}"
 
 
 def content_has_image_parts(content: Any) -> bool:
